@@ -12,32 +12,81 @@ from handlers import register_handlers
 # =========================================================
 
 def main():
-    print("🚀 تشغيل iStoria FAQ Bot...")
+    print("=" * 50)
+    print("🚀 تشغيل iStoria FAQ Bot")
+    print("=" * 50)
 
-    # التحقق من الإعدادات
-    validate_config()
+    # -----------------------------------------------------
+    # 1. التحقق من إعدادات البوت
+    # -----------------------------------------------------
+    print("⚙️ التحقق من الإعدادات...")
 
-    # إنشاء قاعدة البيانات
+    try:
+        validate_config()
+    except Exception as error:
+        print(f"❌ خطأ في إعدادات البوت: {error}")
+        return
+
+    print("✅ إعدادات البوت صحيحة.")
+
+    # -----------------------------------------------------
+    # 2. تهيئة قاعدة البيانات
+    # -----------------------------------------------------
     print("🗄️ تهيئة قاعدة البيانات...")
-    init_database()
 
-    # تحميل قاعدة الأسئلة الأولية
-    print("📚 تحميل قاعدة المعرفة...")
-    seed_database()
+    try:
+        init_database()
+        print("✅ قاعدة البيانات جاهزة.")
+    except Exception as error:
+        print(f"❌ فشل تهيئة قاعدة البيانات: {error}")
+        return
 
-    # إنشاء البوت
-    bot = telebot.TeleBot(
-        BOT_TOKEN,
-        parse_mode="HTML"
-    )
+    # -----------------------------------------------------
+    # 3. تحميل قاعدة المعرفة
+    # -----------------------------------------------------
+    print("📚 تحميل قاعدة أسئلة iStoria...")
 
-    # تسجيل جميع الأوامر والأزرار
-    register_handlers(bot)
+    try:
+        added = seed_database()
+        print(f"✅ تمت معالجة قاعدة المعرفة. تمت إضافة: {added} سؤال.")
+    except Exception as error:
+        print(f"❌ خطأ أثناء تحميل قاعدة المعرفة: {error}")
+        return
 
-    print("✅ البوت يعمل الآن.")
-    print("🤖 iStoria FAQ Bot is running...")
+    # -----------------------------------------------------
+    # 4. إنشاء كائن البوت
+    # -----------------------------------------------------
+    print("🤖 إنشاء اتصال Telegram...")
 
-    # تشغيل مستمر مع إعادة المحاولة عند حدوث خطأ
+    try:
+        bot = telebot.TeleBot(
+            BOT_TOKEN,
+            parse_mode="HTML"
+        )
+    except Exception as error:
+        print(f"❌ فشل إنشاء البوت: {error}")
+        return
+
+    # -----------------------------------------------------
+    # 5. تسجيل الأوامر والأزرار والرسائل
+    # -----------------------------------------------------
+    print("🔧 تسجيل Handlers...")
+
+    try:
+        register_handlers(bot)
+        print("✅ تم تسجيل جميع Handlers.")
+    except Exception as error:
+        print(f"❌ فشل تسجيل Handlers: {error}")
+        return
+
+    # -----------------------------------------------------
+    # 6. تشغيل البوت
+    # -----------------------------------------------------
+    print("=" * 50)
+    print("✅ iStoria FAQ Bot يعمل الآن")
+    print("🤖 Telegram polling started...")
+    print("=" * 50)
+
     while True:
         try:
             bot.infinity_polling(
@@ -46,12 +95,19 @@ def main():
                 long_polling_timeout=30
             )
 
-        except Exception as error:
-            print(f"⚠️ حدث خطأ: {error}")
-            print("🔄 إعادة تشغيل الاتصال خلال 5 ثوانٍ...")
+        except KeyboardInterrupt:
+            print("\n🛑 تم إيقاف البوت يدويًا.")
+            break
 
+        except Exception as error:
+            print(f"⚠️ حدث خطأ أثناء تشغيل البوت: {error}")
+            print("🔄 إعادة الاتصال خلال 5 ثوانٍ...")
             time.sleep(5)
 
+
+# =========================================================
+# تشغيل البرنامج
+# =========================================================
 
 if __name__ == "__main__":
     main()
