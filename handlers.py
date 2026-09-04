@@ -1,3 +1,5 @@
+import html
+
 from telebot import types
 
 from config import ADMIN_IDS, MAX_SEARCH_RESULTS
@@ -7,6 +9,7 @@ from database import (
     delete_faq,
     get_all_faqs,
     get_faq,
+    update_faq,
 )
 from knowledge import search_faq, search_multiple
 from keyboards import (
@@ -18,11 +21,15 @@ from keyboards import (
 
 
 # =========================================================
-# حالات إضافة السؤال
+# حالات المستخدمين
 # =========================================================
 
 user_states = {}
 
+
+# =========================================================
+# أدوات مساعدة
+# =========================================================
 
 def is_admin(user_id):
     return user_id in ADMIN_IDS
@@ -32,42 +39,65 @@ def clear_state(user_id):
     user_states.pop(user_id, None)
 
 
+def safe_text(text):
+    """حماية النص عند استخدام HTML."""
+    return html.escape(str(text or ""))
+
+
+def answer_callback(bot, call, text=None):
+    """إجابة آمنة على ضغط الزر."""
+    try:
+        if text:
+            bot.answer_callback_query(call.id, text)
+        else:
+            bot.answer_callback_query(call.id)
+    except Exception:
+        pass
+
+
 # =========================================================
-# تسجيل Handlers
+# تسجيل جميع Handlers
 # =========================================================
 
 def register_handlers(bot):
 
-    # -----------------------------------------------------
+    # =====================================================
     # /start
-    # -----------------------------------------------------
+    # =====================================================
 
     @bot.message_handler(commands=["start"])
     def start(message):
-        clear_state(message.from_user.id)
+
+        user_id = message.from_user.id
+        clear_state(user_id)
 
         text = (
-            "👋 أهلاً بك في بوت أسئلة iStoria.\n\n"
+            "👋 <b>أهلاً بك في بوت أسئلة iStoria</b>\n\n"
             "🤖 أرسل سؤالك عن تطبيق iStoria، "
-            "وسأحاول العثور على الإجابة المناسبة.\n\n"
+            "وسأبحث لك عن أفضل إجابة موجودة في قاعدة المعرفة.\n\n"
             "يمكنك أيضًا استخدام الأزرار الموجودة بالأسفل."
         )
 
         bot.send_message(
             message.chat.id,
             text,
+            parse_mode="HTML",
             reply_markup=main_menu()
         )
 
-    # -----------------------------------------------------
+    # =====================================================
     # /help
-    # -----------------------------------------------------
+    # =====================================================
 
     @bot.message_handler(commands=["help"])
     def help_command(message):
+
+        clear_state(message.from_user.id)
+
         text = (
             "🆘 <b>مساعدة</b>\n\n"
-            "أرسل سؤالك مباشرة، مثل:\n\n"
+            "أرسل سؤالك عن iStoria مباشرة.\n\n"
+            "أمثلة:\n"
             "• كيف أغير المستوى؟\n"
             "• هل التطبيق مجاني؟\n"
             "• لماذا القصة مقفلة؟\n"
@@ -82,12 +112,13 @@ def register_handlers(bot):
             reply_markup=back_button()
         )
 
-    # -----------------------------------------------------
+    # =====================================================
     # /admin
-    # -----------------------------------------------------
+    # =====================================================
 
     @bot.message_handler(commands=["admin"])
     def admin_command(message):
+
         if not is_admin(message.from_user.id):
             bot.reply_to(
                 message,
@@ -105,12 +136,13 @@ def register_handlers(bot):
             reply_markup=admin_menu()
         )
 
-    # -----------------------------------------------------
+    # =====================================================
     # /add
-    # -----------------------------------------------------
+    # =====================================================
 
     @bot.message_handler(commands=["add"])
     def add_command(message):
+
         if not is_admin(message.from_user.id):
             bot.reply_to(
                 message,
@@ -120,12 +152,13 @@ def register_handlers(bot):
 
         start_add_process(message)
 
-    # -----------------------------------------------------
+    # =====================================================
     # /cancel
-    # -----------------------------------------------------
+    # =====================================================
 
     @bot.message_handler(commands=["cancel"])
     def cancel_command(message):
+
         clear_state(message.from_user.id)
 
         bot.send_message(
@@ -133,27 +166,32 @@ def register_handlers(bot):
             "❌ تم إلغاء العملية."
         )
 
-    # -----------------------------------------------------
+    # =====================================================
     # /stats
-    # -----------------------------------------------------
+    # =====================================================
 
     @bot.message_handler(commands=["stats"])
     def stats_command(message):
+
         if not is_admin(message.from_user.id):
+            bot.reply_to(
+                message,
+                "⛔ هذا الأمر للمشرفين فقط."
+            )
             return
 
         total = count_faqs()
 
         bot.send_message(
             message.chat.id,
-            f"📊 <b>إحصائيات قاعدة المعرفة</b>\n\n"
+            "📊 <b>إحصائيات قاعدة المعرفة</b>\n\n"
             f"📚 عدد الأسئلة: <b>{total}</b>",
             parse_mode="HTML"
         )
 
-    # -----------------------------------------------------
+    # =====================================================
     # استقبال الرسائل النصية
-    # -----------------------------------------------------
+    # =====================================================
 
     @bot.message_handler(
         func=lambda message: True,
@@ -164,23 +202,38 @@ def register_handlers(bot):
         user_id = message.from_user.id
         text = message.text.strip()
 
-        # إذا كان المستخدم داخل عملية إضافة
-        if user_id in user_states:
-            handle_add_process(message)
+        if not text:
             return
 
-        # تجاهل أوامر البوت
+        # -----------------------------------------------
+        # إذا كان المستخدم داخل عملية إدارية
+        # -----------------------------------------------
+
+        if user_id in user_states:
+
+            handle_state_message(message)
+            return
+
+        # -----------------------------------------------
+        # تجاهل الأوامر
+        # -----------------------------------------------
+
         if text.startswith("/"):
             return
+
+        # -----------------------------------------------
+        # البحث في قاعدة المعرفة
+        # -----------------------------------------------
 
         result = search_faq(text)
 
         if result:
+
             faq = result["faq"]
 
             response = (
-                f"💡 <b>الإجابة:</b>\n\n"
-                f"{faq['answer']}"
+                "💡 <b>الإجابة:</b>\n\n"
+                f"{safe_text(faq['answer'])}"
             )
 
             bot.send_message(
@@ -190,10 +243,11 @@ def register_handlers(bot):
             )
 
         else:
+
             bot.send_message(
                 message.chat.id,
                 "🤔 لم أجد إجابة دقيقة لهذا السؤال.\n\n"
-                "حاول صياغة السؤال بطريقة أخرى، "
+                "جرّب صياغة السؤال بطريقة أخرى، "
                 "أو استخدم زر 🔎 البحث."
             )
 
@@ -207,47 +261,67 @@ def register_handlers(bot):
         user_id = call.from_user.id
         data = call.data
 
-        # -------------------------------------------------
-        # القائمة الرئيسية
-        # -------------------------------------------------
+        # =================================================
+        # الرئيسية
+        # =================================================
 
         if data == "back_main":
+
             clear_state(user_id)
 
-            bot.edit_message_text(
-                "🏠 <b>القائمة الرئيسية</b>\n\n"
-                "اختر ما تريد:",
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="HTML",
-                reply_markup=main_menu()
-            )
+            answer_callback(bot, call)
 
-        # -------------------------------------------------
-        # عرض الأسئلة
-        # -------------------------------------------------
+            try:
+                bot.edit_message_text(
+                    "🏠 <b>القائمة الرئيسية</b>\n\n"
+                    "اختر ما تريد:",
+                    call.message.chat.id,
+                    call.message.message_id,
+                    parse_mode="HTML",
+                    reply_markup=main_menu()
+                )
+            except Exception:
+                bot.send_message(
+                    call.message.chat.id,
+                    "🏠 <b>القائمة الرئيسية</b>",
+                    parse_mode="HTML",
+                    reply_markup=main_menu()
+                )
 
-        elif data == "faq_list":
+            return
+
+        # =================================================
+        # الأسئلة الشائعة
+        # =================================================
+
+        if data == "faq_list":
+
+            answer_callback(bot, call)
             show_faq_list(call)
+            return
 
-        # -------------------------------------------------
+        # =================================================
         # البحث
-        # -------------------------------------------------
+        # =================================================
 
-        elif data == "search_faq":
-            bot.answer_callback_query(call.id)
+        if data == "search_faq":
+
+            answer_callback(bot, call)
 
             bot.send_message(
                 call.message.chat.id,
-                "🔎 أرسل السؤال الذي تريد البحث عنه."
+                "🔎 أرسل سؤالك الآن وسأبحث في قاعدة المعرفة."
             )
 
-        # -------------------------------------------------
-        # معلومات iStoria
-        # -------------------------------------------------
+            return
 
-        elif data == "about_istoria":
-            bot.answer_callback_query(call.id)
+        # =================================================
+        # عن iStoria
+        # =================================================
+
+        if data == "about_istoria":
+
+            answer_callback(bot, call)
 
             text = (
                 "📚 <b>عن iStoria</b>\n\n"
@@ -263,12 +337,15 @@ def register_handlers(bot):
                 reply_markup=back_button()
             )
 
-        # -------------------------------------------------
-        # Premium
-        # -------------------------------------------------
+            return
 
-        elif data == "premium_info":
-            bot.answer_callback_query(call.id)
+        # =================================================
+        # Premium
+        # =================================================
+
+        if data == "premium_info":
+
+            answer_callback(bot, call)
 
             text = (
                 "💎 <b>iStoria Premium</b>\n\n"
@@ -285,68 +362,148 @@ def register_handlers(bot):
                 reply_markup=back_button()
             )
 
-        # -------------------------------------------------
-        # المساعدة
-        # -------------------------------------------------
+            return
 
-        elif data == "help":
-            bot.answer_callback_query(call.id)
+        # =================================================
+        # المساعدة
+        # =================================================
+
+        if data == "help":
+
+            answer_callback(bot, call)
 
             bot.send_message(
                 call.message.chat.id,
-                "🆘 أرسل سؤالك عن iStoria مباشرة وسأبحث "
-                "في قاعدة المعرفة.",
+                "🆘 أرسل سؤالك عن iStoria مباشرة، "
+                "وسأبحث في قاعدة المعرفة.",
                 reply_markup=back_button()
             )
 
+            return
+
         # =================================================
-        # لوحة الإدارة
+        # أزرار الإدارة
         # =================================================
 
-        elif data.startswith("admin_"):
+        if data.startswith("admin_"):
 
             if not is_admin(user_id):
-                bot.answer_callback_query(
-                    call.id,
+
+                answer_callback(
+                    bot,
+                    call,
                     "⛔ غير مصرح لك."
                 )
+
                 return
 
             admin_callback(call)
+            return
 
-        # -------------------------------------------------
-        # تأكيد حذف
-        # -------------------------------------------------
+        # =================================================
+        # تأكيد الحذف
+        # =================================================
 
-        elif data.startswith("confirm_delete:"):
+        if data.startswith("confirm_delete:"):
 
             if not is_admin(user_id):
+
+                answer_callback(
+                    bot,
+                    call,
+                    "⛔ غير مصرح لك."
+                )
+
                 return
 
-            faq_id = int(data.split(":")[1])
+            try:
+                faq_id = int(
+                    data.split(":", 1)[1]
+                )
+            except (ValueError, IndexError):
 
-            if delete_faq(faq_id):
-                text = "✅ تم حذف السؤال بنجاح."
+                answer_callback(
+                    bot,
+                    call,
+                    "❌ رقم السؤال غير صحيح."
+                )
+
+                return
+
+            deleted = delete_faq(faq_id)
+
+            if deleted:
+
+                answer_callback(
+                    bot,
+                    call,
+                    "✅ تم الحذف."
+                )
+
+                bot.send_message(
+                    call.message.chat.id,
+                    f"✅ تم حذف السؤال رقم <code>{faq_id}</code> بنجاح.",
+                    parse_mode="HTML",
+                    reply_markup=admin_menu()
+                )
+
             else:
-                text = "❌ لم يتم العثور على السؤال."
 
-            bot.answer_callback_query(call.id)
+                answer_callback(
+                    bot,
+                    call,
+                    "❌ السؤال غير موجود."
+                )
 
-            bot.send_message(
-                call.message.chat.id,
-                text
-            )
+            return
 
-        bot.answer_callback_query(call.id)
+        # =================================================
+        # التصنيفات
+        # =================================================
+
+        if data.startswith("cat_"):
+
+            category_map = {
+                "cat_app": "التطبيق",
+                "cat_free": "النسخة المجانية",
+                "cat_premium": "Premium",
+                "cat_stories": "القصص",
+                "cat_listening": "الاستماع",
+                "cat_pronunciation": "النطق",
+                "cat_levels": "المستويات",
+                "cat_streak": "Streak",
+                "cat_payment": "الدفع والاشتراك",
+                "cat_account": "الحساب",
+                "cat_learning": "التعلم",
+                "cat_other": "أخرى",
+            }
+
+            category = category_map.get(data)
+
+            answer_callback(bot, call)
+
+            if category:
+                show_category(call, category)
+
+            return
+
+        # =================================================
+        # أي Callback غير معروف
+        # =================================================
+
+        answer_callback(bot, call)
 
 
     # =====================================================
-    # بدء عملية إضافة سؤال
+    # بدء إضافة سؤال
     # =====================================================
 
     def start_add_process(message):
 
         user_id = message.from_user.id
+
+        if not is_admin(user_id):
+            return
 
         user_states[user_id] = {
             "step": "question"
@@ -357,84 +514,307 @@ def register_handlers(bot):
             "➕ <b>إضافة سؤال جديد</b>\n\n"
             "أرسل الآن السؤال الذي تريد إضافته.\n\n"
             "مثال:\n"
-            "كيف أغير مستواي في iStoria؟",
+            "كيف أغير مستواي في iStoria؟\n\n"
+            "❌ لإلغاء العملية اكتب /cancel",
             parse_mode="HTML"
         )
 
 
     # =====================================================
-    # معالجة إضافة السؤال
+    # معالجة الحالات
     # =====================================================
 
-    def handle_add_process(message):
+    def handle_state_message(message):
 
         user_id = message.from_user.id
-
-        if not is_admin(user_id):
-            clear_state(user_id)
-            return
-
-        state = user_states[user_id]
         text = message.text.strip()
 
+        if not is_admin(user_id):
+
+            clear_state(user_id)
+
+            bot.send_message(
+                message.chat.id,
+                "⛔ غير مصرح لك."
+            )
+
+            return
+
+        state = user_states.get(user_id)
+
+        if not state:
+            return
+
+        step = state.get("step")
+
         # -------------------------------------------------
-        # السؤال
+        # إضافة سؤال
         # -------------------------------------------------
 
-        if state["step"] == "question":
+        if step == "question":
+
+            if len(text) < 3:
+
+                bot.send_message(
+                    message.chat.id,
+                    "⚠️ السؤال قصير جدًا.\n"
+                    "أرسل سؤالًا واضحًا."
+                )
+
+                return
 
             state["question"] = text
             state["step"] = "answer"
 
             bot.send_message(
                 message.chat.id,
-                "✅ تم حفظ السؤال مؤقتًا.\n\n"
+                "✅ تم حفظ السؤال.\n\n"
                 "الآن أرسل <b>الإجابة</b>.",
                 parse_mode="HTML"
             )
 
+            return
+
         # -------------------------------------------------
-        # الإجابة
+        # إضافة إجابة
         # -------------------------------------------------
 
-        elif state["step"] == "answer":
+        if step == "answer":
+
+            if len(text) < 2:
+
+                bot.send_message(
+                    message.chat.id,
+                    "⚠️ الإجابة قصيرة جدًا."
+                )
+
+                return
 
             state["answer"] = text
             state["step"] = "keywords"
 
             bot.send_message(
                 message.chat.id,
-                "👍 الآن أرسل الكلمات المفتاحية مفصولة بفواصل.\n\n"
+                "👍 الآن أرسل الكلمات المفتاحية "
+                "مفصولة بفواصل.\n\n"
                 "مثال:\n"
                 "تغيير المستوى, اغير الليفل, level, تعديل المستوى",
                 parse_mode="HTML"
             )
 
+            return
+
         # -------------------------------------------------
         # الكلمات المفتاحية
         # -------------------------------------------------
 
-        elif state["step"] == "keywords":
+        if step == "keywords":
 
             state["keywords"] = text
             state["step"] = "category"
 
             bot.send_message(
                 message.chat.id,
-                "📂 أرسل تصنيف السؤال.\n\n"
+                "📂 الآن أرسل تصنيف السؤال.\n\n"
                 "مثال:\n"
                 "المستويات"
             )
+
+            return
 
         # -------------------------------------------------
         # التصنيف
         # -------------------------------------------------
 
-        elif state["step"] == "category":
+        if step == "category":
 
             category = text or "عام"
 
-            faq_id = add_faq(
+            try:
+
+                faq_id = add_faq(
+                    question=state["question"],
+                    answer=state["answer"],
+                    keywords=state["keywords"],
+                    category=category
+                )
+
+            except Exception as error:
+
+                clear_state(user_id)
+
+                print(
+                    f"❌ خطأ أثناء إضافة السؤال: {error}"
+                )
+
+                bot.send_message(
+                    message.chat.id,
+                    "❌ حدث خطأ أثناء حفظ السؤال."
+                )
+
+                return
+
+            clear_state(user_id)
+
+            bot.send_message(
+                message.chat.id,
+                "🎉 <b>تمت إضافة السؤال بنجاح!</b>\n\n"
+                f"🆔 رقم السؤال: <code>{faq_id}</code>\n"
+                f"📂 التصنيف: <b>{safe_text(category)}</b>",
+                parse_mode="HTML",
+                reply_markup=admin_menu()
+            )
+
+            return
+
+        # -------------------------------------------------
+        # حذف سؤال
+        # -------------------------------------------------
+
+        if step == "delete_id":
+
+            try:
+                faq_id = int(text)
+            except ValueError:
+
+                bot.send_message(
+                    message.chat.id,
+                    "⚠️ أرسل رقم السؤال فقط.\n\n"
+                    "مثال:\n"
+                    "<code>15</code>",
+                    parse_mode="HTML"
+                )
+
+                return
+
+            faq = get_faq(faq_id)
+
+            if not faq:
+
+                bot.send_message(
+                    message.chat.id,
+                    "❌ لا يوجد سؤال بهذا الرقم."
+                )
+
+                return
+
+            state["faq_id"] = faq_id
+            state["step"] = "delete_confirm"
+
+            bot.send_message(
+                message.chat.id,
+                "⚠️ <b>تأكيد الحذف</b>\n\n"
+                f"🆔 الرقم: <code>{faq_id}</code>\n"
+                f"❓ السؤال:\n{safe_text(faq['question'])}\n\n"
+                "هل تريد حذف هذا السؤال؟",
+                parse_mode="HTML",
+                reply_markup=confirm_delete(faq_id)
+            )
+
+            return
+
+        # -------------------------------------------------
+        # تعديل سؤال
+        # -------------------------------------------------
+
+        if step == "edit_id":
+
+            try:
+                faq_id = int(text)
+            except ValueError:
+
+                bot.send_message(
+                    message.chat.id,
+                    "⚠️ أرسل رقم السؤال فقط."
+                )
+
+                return
+
+            faq = get_faq(faq_id)
+
+            if not faq:
+
+                bot.send_message(
+                    message.chat.id,
+                    "❌ لا يوجد سؤال بهذا الرقم."
+                )
+
+                return
+
+            state["faq_id"] = faq_id
+            state["step"] = "edit_question"
+
+            bot.send_message(
+                message.chat.id,
+                "✏️ أرسل السؤال الجديد.\n\n"
+                f"السؤال الحالي:\n"
+                f"{safe_text(faq['question'])}",
+                parse_mode="HTML"
+            )
+
+            return
+
+        # -------------------------------------------------
+        # تعديل نص السؤال
+        # -------------------------------------------------
+
+        if step == "edit_question":
+
+            state["question"] = text
+            state["step"] = "edit_answer"
+
+            bot.send_message(
+                message.chat.id,
+                "✏️ أرسل الإجابة الجديدة."
+            )
+
+            return
+
+        # -------------------------------------------------
+        # تعديل الإجابة
+        # -------------------------------------------------
+
+        if step == "edit_answer":
+
+            state["answer"] = text
+            state["step"] = "edit_keywords"
+
+            bot.send_message(
+                message.chat.id,
+                "🔑 أرسل الكلمات المفتاحية الجديدة.\n\n"
+                "استخدم الفواصل بين الكلمات."
+            )
+
+            return
+
+        # -------------------------------------------------
+        # تعديل الكلمات المفتاحية
+        # -------------------------------------------------
+
+        if step == "edit_keywords":
+
+            state["keywords"] = text
+            state["step"] = "edit_category"
+
+            bot.send_message(
+                message.chat.id,
+                "📂 أرسل التصنيف الجديد."
+            )
+
+            return
+
+        # -------------------------------------------------
+        # تعديل التصنيف وحفظ التعديل
+        # -------------------------------------------------
+
+        if step == "edit_category":
+
+            category = text or "عام"
+
+            faq_id = state["faq_id"]
+
+            success = update_faq(
+                faq_id=faq_id,
                 question=state["question"],
                 answer=state["answer"],
                 keywords=state["keywords"],
@@ -443,14 +823,45 @@ def register_handlers(bot):
 
             clear_state(user_id)
 
-            bot.send_message(
-                message.chat.id,
-                "🎉 <b>تمت إضافة السؤال بنجاح!</b>\n\n"
-                f"🆔 رقم السؤال: <code>{faq_id}</code>\n"
-                f"📂 التصنيف: <b>{category}</b>",
-                parse_mode="HTML",
-                reply_markup=admin_menu()
+            if success:
+
+                bot.send_message(
+                    message.chat.id,
+                    "✅ <b>تم تعديل السؤال بنجاح.</b>\n\n"
+                    f"🆔 رقم السؤال: <code>{faq_id}</code>",
+                    parse_mode="HTML",
+                    reply_markup=admin_menu()
+                )
+
+            else:
+
+                bot.send_message(
+                    message.chat.id,
+                    "❌ تعذر تعديل السؤال."
+                )
+
+            return
+
+        # -------------------------------------------------
+        # البحث الإداري
+        # -------------------------------------------------
+
+        if step == "admin_search":
+
+            results = search_multiple(
+                text,
+                limit=MAX_SEARCH_RESULTS
             )
+
+            clear_state(user_id)
+
+            send_search_results(
+                message.chat.id,
+                results,
+                admin=True
+            )
+
+            return
 
 
     # =====================================================
@@ -462,119 +873,288 @@ def register_handlers(bot):
         faqs = get_all_faqs()
 
         if not faqs:
-            text = "📭 لا توجد أسئلة في قاعدة المعرفة."
-        else:
-            lines = ["📋 <b>الأسئلة الموجودة:</b>\n"]
 
-            for faq in faqs[:30]:
-                lines.append(
-                    f"<code>{faq['id']}</code> — "
-                    f"{faq['question']}"
-                )
+            bot.send_message(
+                call.message.chat.id,
+                "📭 لا توجد أسئلة في قاعدة المعرفة.",
+                reply_markup=back_button()
+            )
 
-            if len(faqs) > 30:
-                lines.append(
-                    f"\n... ويوجد {len(faqs) - 30} سؤال إضافي."
-                )
+            return
 
-            text = "\n".join(lines)
+        lines = [
+            "📋 <b>الأسئلة الموجودة:</b>\n"
+        ]
 
-        bot.answer_callback_query(call.id)
+        for faq in faqs[:30]:
+
+            lines.append(
+                f"<code>{faq['id']}</code> — "
+                f"{safe_text(faq['question'])}"
+            )
+
+        if len(faqs) > 30:
+
+            lines.append(
+                f"\n📚 ويوجد {len(faqs) - 30} سؤال إضافي."
+            )
 
         bot.send_message(
             call.message.chat.id,
-            text,
+            "\n".join(lines),
             parse_mode="HTML",
             reply_markup=back_button()
         )
 
 
     # =====================================================
-    # عمليات الإدارة
+    # عرض تصنيف
+    # =====================================================
+
+    def show_category(call, category):
+
+        faqs = [
+            faq
+            for faq in get_all_faqs()
+            if faq["category"] == category
+        ]
+
+        if not faqs:
+
+            bot.send_message(
+                call.message.chat.id,
+                f"📭 لا توجد أسئلة في تصنيف <b>{safe_text(category)}</b>.",
+                parse_mode="HTML",
+                reply_markup=back_button()
+            )
+
+            return
+
+        lines = [
+            f"📚 <b>{safe_text(category)}</b>\n"
+        ]
+
+        for faq in faqs[:30]:
+
+            lines.append(
+                f"❓ <code>{faq['id']}</code> — "
+                f"{safe_text(faq['question'])}\n"
+                f"💡 {safe_text(faq['answer'])}"
+            )
+
+        bot.send_message(
+            call.message.chat.id,
+            "\n\n".join(lines),
+            parse_mode="HTML",
+            reply_markup=back_button()
+        )
+
+
+    # =====================================================
+    # نتائج البحث
+    # =====================================================
+
+    def send_search_results(chat_id, results, admin=False):
+
+        if not results:
+
+            bot.send_message(
+                chat_id,
+                "🔎 لم أجد نتائج."
+            )
+
+            return
+
+        lines = [
+            "🔎 <b>نتائج البحث:</b>\n"
+        ]
+
+        for item in results:
+
+            faq = item["faq"]
+            score = item["score"]
+
+            if score <= 0:
+                continue
+
+            if admin:
+
+                lines.append(
+                    f"🆔 <code>{faq['id']}</code>\n"
+                    f"❓ {safe_text(faq['question'])}\n"
+                    f"📊 التطابق: <b>{score:.0%}</b>\n"
+                    f"📂 {safe_text(faq['category'])}"
+                )
+
+            else:
+
+                lines.append(
+                    f"❓ <b>{safe_text(faq['question'])}</b>\n"
+                    f"💡 {safe_text(faq['answer'])}\n"
+                    f"📊 التطابق: {score:.0%}"
+                )
+
+        bot.send_message(
+            chat_id,
+            "\n\n".join(lines),
+            parse_mode="HTML"
+        )
+
+
+    # =====================================================
+    # وظائف الإدارة
     # =====================================================
 
     def admin_callback(call):
 
         data = call.data
+        user_id = call.from_user.id
 
+        # -------------------------------------------------
         # إضافة
+        # -------------------------------------------------
+
         if data == "admin_add":
-            bot.answer_callback_query(call.id)
+
+            answer_callback(bot, call)
             start_add_process(call.message)
 
-        # قائمة
-        elif data == "admin_list":
-            bot.answer_callback_query(call.id)
+            return
+
+        # -------------------------------------------------
+        # قائمة الأسئلة
+        # -------------------------------------------------
+
+        if data == "admin_list":
+
+            answer_callback(bot, call)
             show_faq_list(call)
 
-        # إحصائيات
-        elif data == "admin_stats":
+            return
+
+        # -------------------------------------------------
+        # الإحصائيات
+        # -------------------------------------------------
+
+        if data == "admin_stats":
 
             total = count_faqs()
 
-            bot.answer_callback_query(call.id)
+            answer_callback(bot, call)
 
             bot.send_message(
                 call.message.chat.id,
-                f"📊 <b>إحصائيات البوت</b>\n\n"
+                "📊 <b>إحصائيات البوت</b>\n\n"
                 f"📚 إجمالي الأسئلة: <b>{total}</b>",
                 parse_mode="HTML",
                 reply_markup=back_button()
             )
 
-        # حذف
-        elif data == "admin_delete":
+            return
 
-            bot.answer_callback_query(call.id)
+        # -------------------------------------------------
+        # حذف
+        # -------------------------------------------------
+
+        if data == "admin_delete":
+
+            answer_callback(bot, call)
+
+            clear_state(user_id)
+
+            user_states[user_id] = {
+                "step": "delete_id"
+            }
 
             bot.send_message(
                 call.message.chat.id,
-                "🗑 أرسل رقم السؤال الذي تريد حذفه.\n\n"
+                "🗑 <b>حذف سؤال</b>\n\n"
+                "أرسل رقم السؤال الذي تريد حذفه.\n\n"
+                "مثال:\n"
+                "<code>15</code>\n\n"
+                "❌ للإلغاء: /cancel",
+                parse_mode="HTML"
+            )
+
+            return
+
+        # -------------------------------------------------
+        # البحث
+        # -------------------------------------------------
+
+        if data == "admin_search":
+
+            answer_callback(bot, call)
+
+            clear_state(user_id)
+
+            user_states[user_id] = {
+                "step": "admin_search"
+            }
+
+            bot.send_message(
+                call.message.chat.id,
+                "🔎 أرسل كلمة أو سؤالًا للبحث "
+                "في قاعدة المعرفة."
+            )
+
+            return
+
+        # -------------------------------------------------
+        # تعديل
+        # -------------------------------------------------
+
+        if data == "admin_edit":
+
+            answer_callback(bot, call)
+
+            clear_state(user_id)
+
+            user_states[user_id] = {
+                "step": "edit_id"
+            }
+
+            bot.send_message(
+                call.message.chat.id,
+                "✏️ <b>تعديل سؤال</b>\n\n"
+                "أرسل رقم السؤال الذي تريد تعديله.\n\n"
                 "مثال:\n"
                 "<code>15</code>",
                 parse_mode="HTML"
             )
 
-            user_states[call.from_user.id] = {
-                "step": "delete_id"
-            }
+            return
 
-        # بحث الإدارة
-        elif data == "admin_search":
-
-            bot.answer_callback_query(call.id)
-
-            bot.send_message(
-                call.message.chat.id,
-                "🔎 أرسل كلمة أو سؤال للبحث في قاعدة المعرفة."
-            )
-
-        # تعديل
-        elif data == "admin_edit":
-
-            bot.answer_callback_query(call.id)
-
-            bot.send_message(
-                call.message.chat.id,
-                "✏️ نظام تعديل الأسئلة سنفعّله في المرحلة التالية."
-            )
-
+        # -------------------------------------------------
         # استيراد
-        elif data == "admin_import":
+        # -------------------------------------------------
 
-            bot.answer_callback_query(call.id)
+        if data == "admin_import":
+
+            answer_callback(bot, call)
 
             bot.send_message(
                 call.message.chat.id,
-                "📥 الاستيراد من JSON سنفعّله بعد اكتمال المشروع."
+                "📥 استيراد الأسئلة من JSON "
+                "سيتم تفعيله في المرحلة التالية.",
+                reply_markup=back_button()
             )
 
+            return
+
+        # -------------------------------------------------
         # تصدير
-        elif data == "admin_export":
+        # -------------------------------------------------
 
-            bot.answer_callback_query(call.id)
+        if data == "admin_export":
+
+            answer_callback(bot, call)
 
             bot.send_message(
                 call.message.chat.id,
-                "📤 التصدير إلى JSON سنفعّله بعد اكتمال المشروع."
+                "📤 تصدير قاعدة المعرفة إلى JSON "
+                "سيتم تفعيله في المرحلة التالية.",
+                reply_markup=back_button()
             )
+
+            return
